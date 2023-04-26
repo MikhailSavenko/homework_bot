@@ -1,5 +1,4 @@
 import logging
-import datetime
 import time
 import requests
 import os
@@ -20,6 +19,7 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 RETRY_PERIOD = 600
+PERIOD_TIME_DAYS = 30
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -30,8 +30,6 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-PREVIOUS_STATUS = ''
-
 
 def check_tokens():
     """
@@ -39,18 +37,13 @@ def check_tokens():
 
     :raises Exception: Если одна из переменных окружения отсутствует.
     """
-    required_tokens = ['PRACTICUM_TOKEN', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID']
+    is_token = (PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
 
-    for token in required_tokens:
-        token_values = os.getenv(token)
-        if token_values is None or token_values == '':
-            error_message = f'Переменная окружения {token} не задана'
-            logging.critical(error_message)
-            return False
-    else:
-        logging.info('Все переменные окружения доступны')
-        logging.debug('Все переменные окружения доступны')
-        return True
+    if not all(is_token):
+        error_message = 'Переменная окружения не задана'
+        logging.critical(error_message)
+        raise ValueError(error_message)
+    return True
 
 
 def send_message(bot, message):
@@ -85,15 +78,16 @@ def get_api_answer(timestamp):
         params = {'from_date': timestamp}
         response_api = requests.get(url=ENDPOINT, params=params,
                                     headers=HEADERS)
-        if response_api.status_code != 200:
-            logging.error('Ошибка при запросе API')
-            raise Exception(f'Ошибка при запросе API: код ответа'
-                            f'{response_api.status_code}')
-        response = response_api.json()
-        logging.info(response)
-        return response
     except requests.RequestException as e:
         logging.error(f'Ошибка при запросе API: {e}')
+
+    if response_api.status_code != 200:
+        logging.error('Ошибка при запросе API')
+        raise Exception(f'Ошибка при запросе API: код ответа'
+                        f'{response_api.status_code}')
+    response = response_api.json()
+    logging.info(type(response))
+    return response
 
 
 def check_response(response):
@@ -109,38 +103,28 @@ def check_response(response):
     'homeworks' в response не является списком.
     - KeyError: Если в response отсутствует ключ 'homeworks'.
     """
-    if isinstance(response, list):
+    if isinstance(d := response, list):
         raise TypeError('Ожидается словарь, получен список')
-    if 'homeworks' in response:
-        logging.info(response)
-        if not isinstance(response, dict):
-            raise TypeError('В ответ от API ожидался тип данных словарь.')
-        homework = response['homeworks']
-        if not isinstance(homework, list):
-            raise TypeError('Ожидался тип данных список')
-        homework = homework[0]
-        logging.info(type(homework))
-        return homework
-    else:
-        raise KeyError('Нет ключа "homeworks"')
+    if d.get('homeworks') is None:
+        raise KeyError('Ключ словаря None')
+    if not isinstance(response, dict):
+        raise TypeError('В ответ от API ожидался тип данных словарь.')
+    homeworks = response['homeworks']
+    if not isinstance(homeworks, list):
+        raise TypeError('Ожидался тип данных список')
+    homework = homeworks[0]
+    return homework
 
 
 def parse_status(homework):
-    """
-    Извлекает статус проверки работы из ответа API.
-
-    Args:
-        homework: Список словарей, содержащий информацию о домашней работе.
-
-    Returns:
-        Строка с информацией об изменении статуса проверки работы или
-        'Неизвестный статус работы',
-        если статус не соответствует ожидаемым значениям. Если произошла
-        ошибка, возвращает None.
-    """
-    global PREVIOUS_STATUS
+    """Извлекает статус проверки работы из ответа API."""
+    PREVIOUS_STATUS = None
     logging.info(type(homework))
     try:
+        if not homework:
+            raise ValueError('Пустой список')
+        if 'status' not in homework:
+            raise KeyError('Нет ключа "status"')
         status = homework.get('status')
         logging.info(status)
         if 'homework_name' not in homework:
@@ -160,43 +144,32 @@ def parse_status(homework):
     except AttributeError:
         logging.error('Ошибка при попытке извлечения статуса работы из ответа'
                       'API.')
-        return None
+    return None
 
 
 def main():
     """Основная логика работы бота."""
     # Проверяем переменные окружения
-    if PRACTICUM_TOKEN is None or \
-       TELEGRAM_TOKEN is None or \
-       TELEGRAM_CHAT_ID is None:
-        logging.critical('Переменные окружения не заданы')
-        sys.exit(1)
     check = check_tokens()
+    if check is ValueError:
+        sys.exit(1)
+    logging.debug('Все переменные окружения доступны')
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
-    dt = datetime.datetime.fromtimestamp(int(time.time()))
-    dt_minus_30_days = dt - datetime.timedelta(days=30)
-    timestamp = int(dt_minus_30_days.timestamp())
-
+    period_time_seconds = PERIOD_TIME_DAYS * 24 * 60 * 60
+    timestamp = int(time.time() - period_time_seconds)
     while True:
         try:
-            if check is False:
-                logging.critical('Нет переменных окружения.')
-                break
-            # Получаем ответ от API
             response = get_api_answer(timestamp)
-            # Проверяем ответ API на ошибки и извлекаем нужную работу.
             homework = check_response(response)
-            # Извлекаем статус работы и формируем сообщение для отправки в
-            # Telegram.
             message = parse_status(homework)
-            # Отправляем сообщение в Telegram.
             send_message(bot, message)
-            # Устанавливаем задержку выполнения кода на определенный период.
-            time.sleep(RETRY_PERIOD)
+
         except Exception as error:
             logging.error(f'Произошла ошибка: {error}')
             message = f'Сбой в работе программы: {error}'
             send_message(bot, f'Произошла ошибка: {error}')
+            # Устанавливаем задержку выполнения кода на определенный период.
+        finally:
             time.sleep(RETRY_PERIOD)
 
 
