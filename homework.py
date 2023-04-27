@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 import telegram
 import sys
 from more_exceptions import UndocumentedStatus
+from http import HTTPStatus
+
 
 load_dotenv()
 
@@ -19,7 +21,7 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 RETRY_PERIOD = 600
-PERIOD_TIME_DAYS = 30
+PERIOD_TIME_DAYS = 5
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -37,12 +39,10 @@ def check_tokens():
 
     :raises Exception: Если одна из переменных окружения отсутствует.
     """
-    is_token = (PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
+    tokens = (PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
 
-    if not all(is_token):
-        error_message = 'Переменная окружения не задана'
-        logging.critical(error_message)
-        raise ValueError(error_message)
+    if not all(tokens):
+        return False
     return True
 
 
@@ -81,8 +81,7 @@ def get_api_answer(timestamp):
     except requests.RequestException as e:
         logging.error(f'Ошибка при запросе API: {e}')
 
-    if response_api.status_code != 200:
-        logging.error('Ошибка при запросе API')
+    if response_api.status_code != HTTPStatus.OK:
         raise Exception(f'Ошибка при запросе API: код ответа'
                         f'{response_api.status_code}')
     response = response_api.json()
@@ -103,55 +102,42 @@ def check_response(response):
     'homeworks' в response не является списком.
     - KeyError: Если в response отсутствует ключ 'homeworks'.
     """
-    if isinstance(d := response, list):
-        raise TypeError('Ожидается словарь, получен список')
-    if d.get('homeworks') is None:
-        raise KeyError('Ключ словаря None')
     if not isinstance(response, dict):
-        raise TypeError('В ответ от API ожидался тип данных словарь.')
-    homeworks = response['homeworks']
+        raise TypeError('В ответ от API ожидался тип данных словарь')
+    if (homeworks := response.get('homeworks')) is None:
+        raise KeyError('В словаре отсутствует ключ "homeworks"')
     if not isinstance(homeworks, list):
-        raise TypeError('Ожидался тип данных список')
-    homework = homeworks[0]
-    return homework
+        raise TypeError('Значение ключа "homeworks" должно  быть списком')
+    logging.info(homeworks)
+    logging.info(type(homeworks))
+    return response
 
 
 def parse_status(homework):
     """Извлекает статус проверки работы из ответа API."""
-    PREVIOUS_STATUS = None
-    logging.info(type(homework))
     try:
-        if not homework:
-            raise ValueError('Пустой список')
-        if 'status' not in homework:
-            raise KeyError('Нет ключа "status"')
-        status = homework.get('status')
-        logging.info(status)
-        if 'homework_name' not in homework:
-            raise KeyError('Нет ключа "homeworks"')
-        homework_name = homework.get('homework_name')
-        current_status = status
-        if current_status == PREVIOUS_STATUS:
-            pass
-        else:
-            if status in HOMEWORK_VERDICTS:
-                verdict = HOMEWORK_VERDICTS[status]
-                PREVIOUS_STATUS = current_status
-                return f'Изменился статус проверки работы "{homework_name}".'\
-                       f'{verdict}'
-            else:
-                raise UndocumentedStatus('Неизвестный статус работы')
-    except AttributeError:
-        logging.error('Ошибка при попытке извлечения статуса работы из ответа'
-                      'API.')
-    return None
+        if (status := homework.get('status')) is None:
+            raise KeyError('В словаре отсутствует ключ "status"')
+        if status not in HOMEWORK_VERDICTS:
+            raise UndocumentedStatus('Неизвестный статус работы')
+        if (homework_name := homework.get('homework_name')) is None:
+            raise KeyError('В словаре отсутствует ключ "homework_name"')
+        verdict = HOMEWORK_VERDICTS[status]
+        return f'Изменился статус проверки работы "{homework_name}".'\
+               f'{verdict}'
+    except (KeyError, UndocumentedStatus) as e:
+        logging.error((f'Ошибка при попытке извлечения статуса работы из'
+                       f'ответа API: {e}'))
+        raise
 
 
 def main():
     """Основная логика работы бота."""
     # Проверяем переменные окружения
     check = check_tokens()
-    if check is ValueError:
+    if check is False:
+        error_message = 'Переменная окружения не задана'
+        logging.critical(error_message)
         sys.exit(1)
     logging.debug('Все переменные окружения доступны')
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
@@ -160,10 +146,14 @@ def main():
     while True:
         try:
             response = get_api_answer(timestamp)
-            homework = check_response(response)
-            message = parse_status(homework)
-            send_message(bot, message)
-
+            validated_response = check_response(response)
+            homework_list = validated_response.get('homeworks', [])
+            if not homework_list:
+                logging.warning('Список домашних работ пуст')
+                continue
+            for homework in homework_list:
+                message = parse_status(homework)
+                send_message(bot, message)
         except Exception as error:
             logging.error(f'Произошла ошибка: {error}')
             message = f'Сбой в работе программы: {error}'
