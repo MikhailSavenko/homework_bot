@@ -13,7 +13,8 @@ load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s, %(levelname)s, %(message)s, %(name)s'
+    format='{asctime}, {levelname}, {message}, {name}',
+    style='{',
 )
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
@@ -21,7 +22,7 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 RETRY_PERIOD = 600
-PERIOD_TIME_DAYS = 5
+PERIOD_TIME_DAYS = 30
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -40,10 +41,7 @@ def check_tokens():
     :raises Exception: Если одна из переменных окружения отсутствует.
     """
     tokens = (PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
-
-    if not all(tokens):
-        return False
-    return True
+    return all(tokens)
 
 
 def send_message(bot, message):
@@ -85,7 +83,6 @@ def get_api_answer(timestamp):
         raise Exception(f'Ошибка при запросе API: код ответа'
                         f'{response_api.status_code}')
     response = response_api.json()
-    logging.info(type(response))
     return response
 
 
@@ -108,8 +105,6 @@ def check_response(response):
         raise KeyError('В словаре отсутствует ключ "homeworks"')
     if not isinstance(homeworks, list):
         raise TypeError('Значение ключа "homeworks" должно  быть списком')
-    logging.info(homeworks)
-    logging.info(type(homeworks))
     return response
 
 
@@ -123,12 +118,12 @@ def parse_status(homework):
         if (homework_name := homework.get('homework_name')) is None:
             raise KeyError('В словаре отсутствует ключ "homework_name"')
         verdict = HOMEWORK_VERDICTS[status]
-        return f'Изменился статус проверки работы "{homework_name}".'\
-               f'{verdict}'
+        return (f'Изменился статус проверки работы "{homework_name}".'
+                f'{verdict}')
     except (KeyError, UndocumentedStatus) as e:
         logging.error((f'Ошибка при попытке извлечения статуса работы из'
                        f'ответа API: {e}'))
-        raise
+        raise e from None
 
 
 def main():
@@ -147,17 +142,18 @@ def main():
         try:
             response = get_api_answer(timestamp)
             validated_response = check_response(response)
-            homework_list = validated_response.get('homeworks', [])
+            homework_list = validated_response['homeworks']
             if not homework_list:
                 logging.warning('Список домашних работ пуст')
                 continue
-            for homework in homework_list:
+            if len(homework_list) > 0:
+                homework = homework_list[-1]
                 message = parse_status(homework)
                 send_message(bot, message)
+            timestamp = response.get('current_date', timestamp)
         except Exception as error:
             logging.error(f'Произошла ошибка: {error}')
             message = f'Сбой в работе программы: {error}'
-            send_message(bot, f'Произошла ошибка: {error}')
             # Устанавливаем задержку выполнения кода на определенный период.
         finally:
             time.sleep(RETRY_PERIOD)
