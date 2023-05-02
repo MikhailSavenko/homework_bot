@@ -130,7 +130,7 @@ def main():
     """Основная логика работы бота."""
     # Проверяем переменные окружения
     check = check_tokens()
-    if check is False:
+    if not check:
         error_message = 'Переменная окружения не задана'
         logging.critical(error_message)
         sys.exit(1)
@@ -146,10 +146,9 @@ def main():
             if not homework_list:
                 logging.warning('Список домашних работ пуст')
                 continue
-            if len(homework_list) > 0:
-                homework = homework_list[-1]
-                message = parse_status(homework)
-                send_message(bot, message)
+            homework = homework_list[-1]
+            message = parse_status(homework)
+            send_message(bot, message)
             timestamp = response.get('current_date', timestamp)
         except Exception as error:
             logging.error(f'Произошла ошибка: {error}')
